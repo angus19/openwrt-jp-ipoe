@@ -82,140 +82,9 @@ Note: Don't forget to add this _WAN6MAPE_ interface to same firewall zone as WAN
 
 ## ADVANCED CUSTOM CONFIGURATION
 
-MAP-E with IPv4 sharing from ISP is designed to share same IPv4 address with many customers, with different ports being assigned based on IETF rules, the above linked parameter calculator already shown the assigned ports, usually it's divided into groups of 16 ports, according to [this discussion](https://github.com/fakemanhk/openwrt-jp-ipoe/discussions/10) JPNE assigns 15 groups (240 ports), while OCN/plala assign 63 groups (1008 ports). In most cases this should be enough for most home uses (since only IPv4 connections will use them), however a recent test with well known IPv4 based [website](https://nichiban.co.jp) that uses many sessions showing a significant lagging while loading. After investigation the OpenWrt firewall statistics indicating only first group of assigned ports (i.e. only 16 ports) being used and this is the reason of lagging when a large number of simultaneous IPv4 sessions opening, also IPv4 PING is not working. Not sure if it's because Japan ISP MAP-E configuration has something MAP package can't deal with, as a result a system change is required for _**/lib/netifd/proto/map.sh.**_ Below is the diff of original vs new map.sh:
+MAP-E with IPv4 sharing from ISP is designed to share same IPv4 address with many customers, with different ports being assigned based on IETF rules, the above linked parameter calculator already shown the assigned ports, usually it's divided into groups of 16 ports, according to [this discussion](https://github.com/fakemanhk/openwrt-jp-ipoe/discussions/10) JPNE assigns 15 groups (240 ports), while OCN/plala assign 63 groups (1008 ports). In most cases this should be enough for most home uses (since only IPv4 connections will use them), however a recent test with well known IPv4 based [website](https://nichiban.co.jp) that uses many sessions showing a significant lagging while loading. After investigation the OpenWrt firewall statistics indicating only first group of assigned ports (i.e. only 16 ports) being used and this is the reason of lagging when a large number of simultaneous IPv4 sessions opening, also IPv4 PING is not working. Not sure if it's because Japan ISP MAP-E configuration has something MAP package can't deal with, as a result a system change is required for _**/lib/netifd/proto/map.sh.**_ 
 
-```
-root@OpenWrt# diff -c map.sh.old map.sh.new
-*** map.sh.old  Sat Mar  4 03:57:30 2023
---- map.sh.new     Tue Mar  7 00:09:22 2023
-***************
-*** 13,18 ****
---- 13,40 ----
-  # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  # GNU General Public License for more details.
-  
-+ #------------------------------------
-+ #     Modifications by 'cmspam'
-+ #------------------------------------
-+ # These modifications are made to ensure that the multiple port ranges
-+ # used with Japan's MAP-E implementation are actually SNAT-ed to correctly.
-+ 
-+ #------------------------------------
-+ #     Setting to not SNAT to certain ports
-+ #------------------------------------
-+ # This is a space-delimited list of ports to not SNAT to.
-+ # If, for example, you use some ports for servers, it's best to
-+ # include them here, so that they are not used with SNAT.
-+ # Port ranges are not supported, so please list each port individually
-+ # separated with a space.
-+ # 
-+ # Example, if you want to not SNAT to 2938, 7088, and 10233
-+ #
-+ #DONT_SNAT_TO="2938 7088 10233"
-+ 
-+ DONT_SNAT_TO="0"
-+ 
-+ 
-  [ -n "$INCLUDE_ONLY" ] || {
-        . /lib/functions.sh
-        . /lib/functions/network.sh
-***************
-*** 140,158 ****
-              json_add_string snat_ip $(eval "echo \$RULE_${k}_IPV4ADDR")
-            json_close_object
-          else
-            for portset in $(eval "echo \$RULE_${k}_PORTSETS"); do
-!               for proto in icmp tcp udp; do
-!               json_add_object ""
-!                 json_add_string type nat
-!                 json_add_string target SNAT
-!                 json_add_string family inet
-!                 json_add_string proto "$proto"
-!                   json_add_boolean connlimit_ports 1
-!                   json_add_string snat_ip $(eval "echo \$RULE_${k}_IPV4ADDR")
-!                   json_add_string snat_port "$portset"
-!               json_close_object
-!               done
-            done
-          fi
-          if [ "$maptype" = "map-t" ]; then
-                [ -z "$zone" ] && zone=$(fw3 -q network $iface 2>/dev/null)
---- 162,233 ----
-              json_add_string snat_ip $(eval "echo \$RULE_${k}_IPV4ADDR")
-            json_close_object
-          else
-+ 
-+ #------------------------------------
-+           #MODIFICATION 1: Get all ports, and full port count.
-+           #                Don't include ports in DONT_SNAT_TO
-+ #------------------------------------
-+           local portcount=0
-+           local allports=""
-            for portset in $(eval "echo \$RULE_${k}_PORTSETS"); do
-!               local startport=$(echo $portset | cut -d'-' -f1)
-!               local endport=$(echo $portset | cut -d'-' -f2)
-!               for x in $(seq $startport $endport); do
-!                       if ! echo "$DONT_SNAT_TO" | tr ' ' '\n' | grep -qw $x; then                        
-!                               allports="$allports $portcount : $x , "
-!                               portcount=`expr $portcount + 1`
-!                       fi
-!               done
-            done
-+           allports=${allports%??}
-+ #------------------------------------
-+           #END MODIFICATION 1
-+ #------------------------------------
-+           
-+ #------------------------------------
-+             #MODIFICATION 2: Create mape table
-+ #------------------------------------
-+             nft add table inet mape
-+             nft add chain inet mape srcnat {type nat hook postrouting priority 0\; policy accept\; }
-+ #------------------------------------
-+           #END MODIFICATION 2
-+ #------------------------------------
-+ 
-+ 
-+ #------------------------------------
-+           #MODIFICATION 3: Create the rules to snat to all the ports
-+ #------------------------------------
-+           local counter=0
-+           
-+             for proto in icmp tcp udp; do
-+                 nft add rule inet mape srcnat ip protocol $proto oifname "map-$cfg" snat ip to $(eval "echo \$RULE_${k}_IPV4ADDR") : numgen inc mod $portcount map { $allports }
-+             done
-+           #END MODIFICATION 3
-+           
-+ #------------------------------------
-+           #MODIFICATION 4: Comment out original SNAT implementation.
-+ #------------------------------------
-+ #            for portset in $(eval "echo \$RULE_${k}_PORTSETS"); do
-+ #              for proto in icmp tcp udp; do
-+ #                json_add_object ""
-+ #                  json_add_string type nat
-+ #                  json_add_string target SNAT
-+ #                  json_add_string family inet
-+ #                  json_add_string proto "$proto"
-+ #                  json_add_boolean connlimit_ports 1
-+ #                  json_add_string snat_ip $(eval "echo \$RULE_${k}_IPV4ADDR")
-+ #                  json_add_string snat_port "$portset"
-+ #                json_close_object
-+ #              done
-+ #            done
-+ #------------------------------------
-+           #END MODIFICATION 4
-+ #-------------------------------------
-+ #------------------------------------
-+           #ALL MODIFICATIONS FINISHED
-+ #------------------------------------
-+ 
-+ 
-          fi
-          if [ "$maptype" = "map-t" ]; then
-                [ -z "$zone" ] && zone=$(fw3 -q network $iface 2>/dev/null)
-```
-
-You can also download the whole file [here](https://github.com/fakemanhk/openwrt-jp-ipoe/blob/main/map.sh.new), _**don't forget to turn on the execute bit**_ of the file after replacement.
+You can download the whole file [here](https://github.com/fakemanhk/openwrt-jp-ipoe/blob/main/map.sh.new) and replace it, _**don't forget to turn on the execute bit**_ of the file after replacement.
 
 After editing, please restart IPv6 interface, or simply reboot router, you'll see that IPv4 PING is working as well as observing more port groups passing traffic now.
 
@@ -252,4 +121,4 @@ https://datatracker.ietf.org/doc/html/draft-ietf-softwire-map-03#page-6
 
 _First draft: 17 Jan 2023_
 
-_Last Edit: 07 Feb 2024_
+_Last Edit: 05 June 2024_
