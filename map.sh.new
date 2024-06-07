@@ -162,36 +162,33 @@ proto_map_setup() {
 	      json_add_string snat_ip $(eval "echo \$RULE_${k}_IPV4ADDR")
 	    json_close_object
 	  else
-
-#------------------------------------
-	    #MODIFICATION 1: Get all ports, and full port count.
-	    #		     Don't include ports in DONT_SNAT_TO
-#------------------------------------
-	    local portcount=0
-	    local allports=""
-	    for portset in $(eval "echo \$RULE_${k}_PORTSETS"); do
-		local startport=$(echo $portset | cut -d'-' -f1)
-		local endport=$(echo $portset | cut -d'-' -f2)
-		for x in $(seq $startport $endport); do
-			if ! echo "$DONT_SNAT_TO" | tr ' ' '\n' | grep -qw $x; then                        
-				allports="$allports $portcount : $x , "
-				portcount=`expr $portcount + 1`
-			fi
-		done
-	    done
-	    allports=${allports%??}
-#------------------------------------
-	    #END MODIFICATION 1
-#------------------------------------
 	    
 #------------------------------------
-            #MODIFICATION 2: Create mape table
+            #MODIFICATION 1: Create mape table
 #------------------------------------
             if nft list tables | grep -q "table inet mape"; then                                               
                 nft delete table inet mape                                                                             
             fi                                                                                                         
             nft add table inet mape
             nft add chain inet mape srcnat {type nat hook postrouting priority 0\; policy accept\; }
+#------------------------------------
+	    #END MODIFICATION 1
+#------------------------------------
+
+#------------------------------------
+	    #MODIFICATION 2: Get all ports, and full port count.
+	    #		     Don't include ports in DONT_SNAT_TO
+#------------------------------------
+	    local slice=0
+	    for portset in $(eval "echo \$RULE_${k}_PORTSETS"); do
+		local portcount=0
+		local startport=$(echo $portset | cut -d'-' -f1)
+		local endport=$(echo $portset | cut -d'-' -f2)
+		for x in $(seq $startport $endport); do
+			if ! echo "$DONT_SNAT_TO" | tr ' ' '\n' | grep -qw $x; then                        
+				portcount=`expr $portcount + 1`
+			fi
+		done
 #------------------------------------
 	    #END MODIFICATION 2
 #------------------------------------
@@ -203,9 +200,11 @@ proto_map_setup() {
 	    local counter=0
 	    
             for proto in icmp tcp udp; do
-                nft add rule inet mape srcnat ip protocol $proto oifname "map-$cfg" snat ip to $(eval "echo \$RULE_${k}_IPV4ADDR") : numgen inc mod $portcount map { $allports }
+                slice=`expr $slice + 1`
+                nft add rule inet mape srcnat oifname "map-$cfg" meter connlimit$slice { ip daddr ct count $portcount } snat to $(eval "echo \$RULE_${k}_IPV4ADDR"):$portset
             done
 	    #END MODIFICATION 3
+	    done
 	    
 #------------------------------------
 	    #MODIFICATION 4: Comment out original SNAT implementation.
