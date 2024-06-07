@@ -201,7 +201,7 @@ proto_map_setup() {
 	    
             for proto in icmp tcp udp; do
                 slice=`expr $slice + 1`
-                nft add rule inet mape srcnat oifname "map-$cfg" meter connlimit$slice { ip daddr ct count $portcount } snat to $(eval "echo \$RULE_${k}_IPV4ADDR"):$portset
+                nft add rule inet mape srcnat meta l4proto $proto oifname "map-$cfg" meter connlimit$slice { ip daddr ct count $portcount } snat to $(eval "echo \$RULE_${k}_IPV4ADDR"):$portset
             done
 	    #END MODIFICATION 3
 	    done
